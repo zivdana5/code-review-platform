@@ -1,0 +1,2061 @@
+From what I understand, the task has two main parts:
+1. The platform - API part
+API that gets a Python code file from the user.
+when the system get a new code from the user, it first check if an exact code was already sent before. If it was the system output will be the same from the DB, the system will not do the checks again. 
+If it was not scanned before, the system should send the code to the code reviewer part.
+the scan should be asynchronous - from what I understand this means the user send a scan request, get back some scan ID, and later use this scan ID to get the result.
+the system should support up to 5 scans running at the same time.  
+result should be saved in a local database for 24 hours, and after that they should be deleted.
+the user should be able to get the scan result using another API request.
+
+2. The code reviewer part - checks the Python code.
+the required checks are:
+- check if all variables have meaningful names.
+- check if the function docstring really matches what the function does.
+The checks should be done using a local LLM -  Ollama, by prompt 
+the code should be ready to an addional rules in the future 
+
+
+pls  go over the assignment in the image and tell me if I understood it correctly. Also tell me if I missed something or misunderstood one of the requirements. please point out what is required and what is nice to have. 
+dont show me the solution to each step yet, only make sure i understand correctly and everything 
+
+
+
+
+Save the scan request time as a datetime value when you create the scan row.
+
+For your project, this time means:
+
+“When did the user submit this scan request?”
+
+You need it because results are valid for 24 hours.
+
+Best practice: save time in UTC
+
+Use UTC time instead of local Israel time.
+
+Why? Because UTC avoids timezone bugs. Your computer, another reviewer’s computer, or Docker can all have different local settings. UTC is the clean “universal clock” for backend systems.
+
+from datetime import datetime, timezone
+
+created_at = datetime.now(timezone.utc)
+
+This gives you a timezone-aware datetime.
+
+Example: create scan timestamps
+
+When a new scan is created:
+
+from datetime import datetime, timezone, timedelta
+
+created_at = datetime.now(timezone.utc)
+expires_at = created_at + timedelta(hours=24)
+
+Then save both in the DB:
+
+created_at = when scan was requested
+expires_at = when result should stop being valid
+
+So your DB row can look like:
+
+scan_id: "8d82..."
+code_hash: "a91f..."
+status: "pending"
+created_at: "2026-06-06T16:30:00+00:00"
+expires_at: "2026-06-07T16:30:00+00:00"
+result: null
+Simple helper function
+
+You can create a helper:
+
+from datetime import datetime, timezone, timedelta
+
+
+def get_scan_times() -> tuple[datetime, datetime]:
+    created_at = datetime.now(timezone.utc)
+    expires_at = created_at + timedelta(hours=24)
+    return created_at, expires_at
+
+Use it like:
+
+created_at, expires_at = get_scan_times()
+If using SQLModel / SQLAlchemy
+
+Your model can have fields like:
+
+from datetime import datetime
+from typing import Optional
+from sqlmodel import SQLModel, Field
+
+
+class Scan(SQLModel, table=True):
+    scan_id: str = Field(primary_key=True)
+    code_hash: str
+    status: str
+    created_at: datetime
+    expires_at: datetime
+    completed_at: Optional[datetime] = None
+    result: Optional[str] = None
+
+When inserting:
+
+from datetime import datetime, timezone, timedelta
+
+created_at = datetime.now(timezone.utc)
+expires_at = created_at + timedelta(hours=24)
+
+scan = Scan(
+    scan_id=scan_id,
+    code_hash=code_hash,
+    status="pending",
+    created_at=created_at,
+    expires_at=expires_at,
+    result=None
+)
+When the scan finishes
+
+You can also save:
+
+completed_at = datetime.now(timezone.utc)
+
+Then update:
+
+status = "completed"
+completed_at = current UTC time
+result = scan result
+
+This is useful because later you can know:
+
+How long did the scan take?
+completed_at - created_at
+Tiny rule to remember
+
+Use:
+
+datetime.now(timezone.utc)
+
+not:
+
+datetime.now()
+
+because datetime.now() gives a “naive” datetime, meaning Python does not know its timezone. That little ghost can create bugs later 👻.
+
+For your assignment, store:
+
+created_at
+expires_at
+completed_at optional
+
+created_at is the scan request time.
+
+כן, ברור. בשלב הזה נעשה את זה מינימלי:
+
+ה־CodeReviewer יחזיר רק:
+
+{
+  "rules": [
+    {
+      "rule_id": "meaningful_variable_names",
+      "passed": true
+    },
+    {
+      "rule_id": "docstring_matches_logic",
+      "passed": false
+    }
+  ]
+}
+
+בלי explanation, בלי description, בלי טקסט נוסף.
+
+גרסה מעודכנת של CodeReviewer
+import json
+from typing import Any
+
+
+class CodeReviewer:
+    def __init__(self, llm_client: OllamaClient, rules: list[ReviewRule]):
+        self.llm_client = llm_client
+        self.rules = rules
+
+    def review_code(self, code: str) -> dict[str, Any]:
+        """
+        Run all review rules on the given Python code.
+
+        Returns only rule_id and true/false result for each rule.
+        """
+
+        final_results = []
+
+        for rule in self.rules:
+            prompt = rule.build_prompt(code)
+
+            try:
+                model_response_text = self.llm_client.ask(prompt)
+                parsed_response = self._parse_model_response(model_response_text)
+
+                rule_result = {
+                    "rule_id": rule.rule_id,
+                    "passed": parsed_response["passed"],
+                }
+
+            except Exception:
+                rule_result = {
+                    "rule_id": rule.rule_id,
+                    "passed": False,
+                }
+
+            final_results.append(rule_result)
+
+        return {
+            "rules": final_results
+        }
+
+    def _parse_model_response(self, response_text: str) -> dict[str, Any]:
+        """
+        Parse the LLM response as JSON.
+
+        Expected format:
+        {
+            "passed": true
+        }
+        """
+
+        try:
+            parsed = json.loads(response_text)
+        except json.JSONDecodeError:
+            raise ValueError("Model response is not valid JSON.")
+
+        if not isinstance(parsed, dict):
+            raise ValueError("Model response must be a JSON object.")
+
+        if "passed" not in parsed:
+            raise ValueError("Model response is missing 'passed' field.")
+
+        if not isinstance(parsed["passed"], bool):
+            raise ValueError("'passed' field must be true or false.")
+
+        return parsed
+חשוב: צריך גם לעדכן את הפרומפטים
+
+כי עכשיו אנחנו לא רוצים שהמודל יחזיר explanation.
+
+במקום זה:
+
+{
+  "passed": true,
+  "explanation": "short explanation"
+}
+
+תכתבי בפרומפט:
+
+Return only valid JSON in this exact format:
+{
+  "passed": true
+}
+
+כלומר בפרומפט עצמו, בגלל .format, צריך לכתוב עם סוגריים כפולים:
+
+Return only valid JSON in this exact format:
+{{
+  "passed": true
+}}
+הערה קטנה
+
+אני מניח שהתכוונת ל־rule_id כשכתבת “הקוד ID”.
+
+כלומר:
+
+{
+  "rule_id": "meaningful_variable_names",
+  "passed": true
+}
+
+אם התכוונת ל־scan_id או code_hash, זה שייך יותר ל־API/DB response ולא ל־CodeReviewer עצמו.
+
+code_reviewer(2).py
+Python
+database(3).py
+Python
+main(3).py
+Python
+platform(2).py
+Python
+ok i think i finished pls review 
+
+Yes, this is a good POC structure. You now have the right main pieces:
+
+main.py
+→ starts FastAPI and creates DB tables
+
+platform.py
+→ API routes, file validation, hash, background scan flow
+
+database.py
+→ all database actions
+
+code_reviewer.py
+→ rules, Ollama client, code reviewer
+
+That separation is exactly what you want. The project has a clean spine now. 🦴
+
+The most important fixes
+1. Fix get_scan_by_hash
+
+Right now your method says “same code scanned in the last 24 hours,” but the code does not check expires_at > now. It also only returns scans where result is not None, so if the same code is already running, it will start a duplicate scan. That weakens the reuse logic.
+
+Current logic:
+
+.where(Scan.status != STATUS_FAILED)
+.where(Scan.result.is_not(None))
+
+Better:
+
+def get_scan_by_hash(self, code_hash: str) -> Optional[Scan]:
+    now = datetime.now(timezone.utc)
+
+    with Session(self.engine) as session:
+        statement = (
+            select(Scan)
+            .where(Scan.code_hash == code_hash)
+            .where(Scan.expires_at > now)
+            .where(Scan.status != STATUS_FAILED)
+            .order_by(Scan.created_at.desc())
+        )
+        return session.exec(statement).first()
+
+This allows reuse of:
+
+completed scan → return existing result/status
+running scan → return existing scan_id instead of starting duplicate work
+failed scan → ignore and allow retry
+
+This is the biggest requirement-related fix.
+
+2. Your prompts still ask for explanation
+
+You said you want only true/false, but both prompts still tell the model to return:
+
+{
+  "passed": true,
+  "explanation": "short explanation"
+}
+
+The CodeReviewer output only returns rule_id and passed, so the API response is okay, but the prompt is still asking for extra information.
+
+Change both prompts to:
+
+Return only valid JSON in this exact format:
+{
+    "passed": true
+}
+
+This makes the LLM’s job simpler and makes parsing cleaner.
+
+3. Your CodeReviewer hides all errors as passed=False
+
+This part works, but be careful:
+
+except Exception:
+    rule_result = {
+        "rule_id": rule.rule_id,
+        "passed": False,
+    }
+
+This means if Ollama is not running, invalid JSON, timeout, or any real error happens, the rule simply becomes false.
+
+For a POC it is okay, but it can be misleading because:
+
+rule failed because code is bad
+
+and
+
+rule failed because Ollama crashed
+
+look exactly the same.
+
+Better for now, maybe still keep the API output simple, but internally raise the error so the whole scan becomes failed.
+
+For example:
+
+except Exception as error:
+    raise RuntimeError(f"Failed to check rule {rule.rule_id}: {error}")
+
+Then your background function already handles it nicely:
+
+except Exception as error:
+    db.mark_scan_failed(scan_id, str(error))
+
+That part is good.
+
+4. Consider adding syntax validation with ast.parse
+
+Your file validation currently checks:
+
+file exists
+.py extension
+not empty
+UTF-8 text
+
+That is good.
+
+But you are not checking if it is actually valid Python syntax.
+
+Add:
+
+import ast
+
+Then inside check_if_valid_file_input after decoding:
+
+try:
+    ast.parse(code_text)
+except SyntaxError as error:
+    raise HTTPException(
+        status_code=400,
+        detail=f"Invalid Python syntax: {error.msg} at line {error.lineno}"
+    )
+
+This is not strictly required unless the assignment asks for it, but it makes your API much more reliable.
+
+5. main.py has unused imports
+
+In main.py, these are unused:
+
+import hashlib
+from uuid import uuid4
+from fastapi import File, HTTPException, UploadFile
+from datetime import datetime, timezone
+
+You only need:
+
+from fastapi import FastAPI
+from code_review.platform import router, db
+
+Your startup logic is fine.
+
+Smaller improvements
+Set echo=False before submission
+
+In database.py:
+
+self.engine = create_engine(db_url, echo=True, ...)
+
+echo=True prints SQL logs. Good for debugging, noisy for final submission. Change to:
+
+echo=False
+
+before sending.
+
+Add completed_at
+
+Not mandatory, but useful. Your Scan table currently has no completed_at.
+
+Nice addition:
+
+completed_at: Optional[datetime] = None
+
+Then update it in:
+
+update_scan_result
+mark_scan_failed
+Typo in welcome message
+"Hi! welcome to my code review paltform"
+
+Change paltform to platform. Tiny typo goblin.
+
+What is already good
+
+Your async scan flow is good:
+
+POST /scans
+→ delete expired scans
+→ validate file
+→ hash code
+→ check existing code
+→ check running scans limit
+→ create scan
+→ run background task
+→ return scan_id
+
+That matches the assignment well.
+
+Your result endpoint is also good:
+
+GET /scans/{scan_id}
+→ if completed, return result
+→ if failed, return error_message
+→ otherwise return status
+
+That is exactly the right API behavior.
+
+Your DB class structure is also good overall: create scan, update result, mark failed, get by ID, delete expired, count running scans.
+
+Final verdict
+
+You are in a good place. I would fix these before moving on:
+
+1. Add expires_at filter in get_scan_by_hash.
+2. Allow get_scan_by_hash to return running scans too.
+3. Change prompts to return only {"passed": true}.
+4. Decide whether CodeReviewer should hide LLM errors or fail the scan.
+5. Remove unused imports.
+6. Optional: add ast.parse validation.
+7. Optional: add completed_at.
+
+After that, the core backend skeleton is solid enough to start testing with real uploaded files and Ollama.
+
+can you please create a file that contains all the questions i asked you in this conversation, with a one sentence description of the answer you gave me for each question, so i can add it to my home assignment submission?
+
+Done. I created a Markdown file you can add to your submission:
+
+Download the conversation summary 
+
+Yes. The difference is mainly how you structure the input and what kind of task you are doing.
+
+In your project, both can work, but I recommend /api/chat.
+
+The simple idea
+/api/generate
+
+/api/generate is the simpler endpoint.
+
+You send one big prompt:
+
+You are a strict Python code reviewer.
+Check this code.
+Return only JSON.
+
+Code:
+...
+
+So the request looks like:
+
+payload = {
+    "model": "qwen2.5-coder:7b",
+    "prompt": prompt,
+    "stream": False
+}
+
+The answer comes back in:
+
+data["response"]
+/api/chat
+
+/api/chat is the chat-style endpoint.
+
+Instead of one big prompt, you send a list of messages with roles:
+
+system: You are a strict Python code reviewer.
+user: Check this code and return JSON.
+
+So the request looks like:
+
+payload = {
+    "model": "qwen2.5-coder:7b",
+    "messages": [
+        {
+            "role": "system",
+            "content": "You are a strict Python code reviewer. Return only valid JSON."
+        },
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ],
+    "stream": False
+}
+
+The answer comes back in:
+
+data["message"]["content"]
+Main difference
+/api/generate = one raw prompt
+
+You give the model a single block of text.
+
+Example:
+
+You are a strict Python code reviewer.
+
+Rule:
+Check if variable names are meaningful.
+
+Return only:
+{"passed": true}
+or
+{"passed": false}
+
+Code:
+def f(x):
+    return x + 1
+
+This is simple and perfectly fine.
+
+/api/chat = structured conversation
+
+You separate the “instruction” from the “user task”.
+
+Example:
+
+messages = [
+    {
+        "role": "system",
+        "content": "You are a strict Python code reviewer. Return only JSON."
+    },
+    {
+        "role": "user",
+        "content": """
+Rule:
+Check if variable names are meaningful.
+
+Code:
+def f(x):
+    return x + 1
+"""
+    }
+]
+
+This is cleaner for a real app.
+
+Practical comparison
+Feature	/api/generate	/api/chat
+Input style	One prompt string	List of messages
+Has system/user roles	Not naturally	Yes
+Simpler for beginners	Yes	Slightly more structured
+Better for assistant-like behavior	Less	Yes
+Better for future multi-turn chat	No	Yes
+Response location	data["response"]	data["message"]["content"]
+Good for your project	Yes	Better
+Example with /api/generate
+import requests
+
+prompt = """
+You are a strict Python code reviewer.
+Return only valid JSON.
+
+Check whether this Python code uses meaningful variable names.
+
+Return exactly:
+{"passed": true}
+or
+{"passed": false}
+
+Code:
+def f(x):
+    return x + 1
+"""
+
+response = requests.post(
+    "http://localhost:11434/api/generate",
+    json={
+        "model": "qwen2.5-coder:7b",
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0
+        }
+    },
+    timeout=120
+)
+
+data = response.json()
+answer = data["response"]
+
+print(answer)
+
+Possible answer:
+
+{"passed": false}
+Example with /api/chat
+import requests
+
+user_prompt = """
+Check whether this Python code uses meaningful variable names.
+
+Return exactly:
+{"passed": true}
+or
+{"passed": false}
+
+Code:
+def f(x):
+    return x + 1
+"""
+
+response = requests.post(
+    "http://localhost:11434/api/chat",
+    json={
+        "model": "qwen2.5-coder:7b",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict Python code reviewer. "
+                    "Return only valid JSON. "
+                    "Do not explain your answer."
+                )
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ],
+        "stream": False,
+        "options": {
+            "temperature": 0
+        }
+    },
+    timeout=120
+)
+
+data = response.json()
+answer = data["message"]["content"]
+
+print(answer)
+
+Possible answer:
+
+{"passed": false}
+When should you use /api/generate?
+
+Use /api/generate when you have a simple one-shot task.
+
+Good examples:
+
+Summarize this text.
+Translate this paragraph.
+Generate a function.
+Review this code once.
+Classify this input.
+
+For example:
+
+Prompt in, answer out.
+
+Like a vending machine:
+
+input prompt → output text
+
+Very simple. Very usable.
+
+When should you use /api/chat?
+
+Use /api/chat when you want role separation or conversation-style logic.
+
+Good examples:
+
+System instruction + user request
+Code reviewer with strict behavior
+Multi-turn conversation
+Assistant-style app
+More controlled responses
+
+For your project, this is useful because you can say:
+
+system:
+You are a strict reviewer. Return JSON only.
+
+user:
+Here is the rule and code.
+
+That separation makes your design cleaner.
+
+Important difference in response shape
+/api/generate
+
+Response content is here:
+
+data["response"]
+
+Example:
+
+{
+  "model": "qwen2.5-coder:7b",
+  "response": "{\"passed\": false}",
+  "done": true
+}
+
+So:
+
+answer = data["response"]
+/api/chat
+
+Response content is here:
+
+data["message"]["content"]
+
+Example:
+
+{
+  "model": "qwen2.5-coder:7b",
+  "message": {
+    "role": "assistant",
+    "content": "{\"passed\": false}"
+  },
+  "done": true
+}
+
+So:
+
+answer = data["message"]["content"]
+For your OllamaClient, what changes?
+If using /api/generate
+def ask(self, prompt: str) -> str:
+    response = requests.post(
+        f"{self.base_url}/api/generate",
+        json={
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0
+            }
+        },
+        timeout=120
+    )
+
+    response.raise_for_status()
+    data = response.json()
+    return data["response"]
+If using /api/chat
+def ask(self, prompt: str) -> str:
+    response = requests.post(
+        f"{self.base_url}/api/chat",
+        json={
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict Python code reviewer. "
+                        "Return only valid JSON. "
+                        "No markdown. No explanation."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0
+            }
+        },
+        timeout=120
+    )
+
+    response.raise_for_status()
+    data = response.json()
+    return data["message"]["content"]
+Which one is better for your assignment?
+
+For your code-review system, I would use:
+
+/api/chat
+
+Because your system naturally has two types of instructions:
+
+Permanent behavior:
+"You are a strict code reviewer. Return only JSON."
+
+Specific task:
+"Check this code according to this rule."
+
+That maps perfectly to:
+
+system message
+user message
+
+So your request becomes cleaner:
+
+messages = [
+    {
+        "role": "system",
+        "content": "You are a strict Python code reviewer. Return only JSON."
+    },
+    {
+        "role": "user",
+        "content": rule_prompt_with_code
+    }
+]
+My recommendation
+
+Use /api/chat in your project.
+
+Your OllamaClient should hide the details:
+
+class OllamaClient:
+    def ask(self, prompt: str) -> str:
+        # sends prompt to /api/chat
+        # returns only model answer text
+
+Then the rest of your project does not care whether you use /api/chat or /api/generate.
+
+That is good design.
+
+CodeReviewer does not know about HTTP.
+Database does not know about Ollama.
+Main API does not know about model response shape.
+Only OllamaClient knows.
+
+Tiny architecture magic: each class carries one backpack, not the entire furniture store. 🧰
+
+code_reviewer(5).py
+Python
+database(6).py
+Python
+main(6).py
+Python
+platform(5).py
+Python
+pls check
+
+Yes, you mostly follow the rule, but not perfectly yet.
+
+The rule says:
+
+“Please make sure connection to model provider and model details are parametrized to allow easy replacement for testing / future replacement.”
+
+Your current code does this partly:
+
+class OllamaClient:
+    def __init__(
+        self,
+        base_url: str = OLLAMA_BASE_URL,
+        model: str = OLLAMA_MODEL,
+        timeout_seconds: int = OLLAMA_TIMEOUT_SECONDS,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    ):
+
+That is good because base_url, model, timeout_seconds, and system_prompt are configurable.
+
+But there are two weak points.
+
+What is good now
+1. Model name is parametrized
+
+You have:
+
+OLLAMA_MODEL = "qwen2.5-coder:7b"
+
+and then:
+
+model: str = OLLAMA_MODEL
+
+So later you can replace:
+
+OllamaClient(model="llama3.2")
+
+or:
+
+OllamaClient(model="mistral")
+
+This follows the rule.
+
+2. Provider URL is parametrized
+
+You have:
+
+OLLAMA_BASE_URL = "http://localhost:11434"
+
+and then:
+
+base_url: str = OLLAMA_BASE_URL
+
+So for tests or future changes, you can use:
+
+OllamaClient(base_url="http://fake-provider")
+
+This is also good.
+
+3. CodeReviewer receives the LLM client from outside
+
+This is very good:
+
+class CodeReviewer:
+    def __init__(self, llm_client: OllamaClient, rules: list[ReviewRule]):
+        self.llm_client = llm_client
+        self.rules = rules
+
+That means CodeReviewer does not create OllamaClient by itself. It receives it. This is called dependency injection, and it makes testing much easier.
+
+So this is already correct:
+
+fake_client = FakeLLMClient()
+reviewer = CodeReviewer(fake_client, rules)
+
+Nice little plug socket design. The reviewer does not care what machine is plugged in. 🔌
+
+What is not perfect yet
+Problem 1: endpoint is not parametrized
+
+You currently have:
+
+OLLAMA_ENDPOINT = "/api/chat"
+
+and inside ask():
+
+url = f"{self.base_url}{OLLAMA_ENDPOINT}"
+
+The endpoint is a global constant, not a parameter of the class.
+
+It is not terrible, but for the requirement, better to make it configurable.
+
+Change to:
+
+class OllamaClient:
+    def __init__(
+        self,
+        base_url: str = OLLAMA_BASE_URL,
+        endpoint: str = OLLAMA_ENDPOINT,
+        model: str = OLLAMA_MODEL,
+        timeout_seconds: int = OLLAMA_TIMEOUT_SECONDS,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.endpoint = endpoint
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+        self.system_prompt = system_prompt
+
+Then:
+
+url = f"{self.base_url}{self.endpoint}"
+Problem 2: platform.py creates a real OllamaClient globally
+
+In platform.py, you currently do:
+
+llm_client = OllamaClient()
+code_reviewer = CodeReviewer(
+    llm_client=llm_client,
+    rules=REVIEW_RULES,
+)
+
+This works, but for testing/future replacement, it is less flexible because the real provider is created immediately when the module loads.
+
+Your tests can still monkeypatch it, but cleaner design is to create it from settings/config.
+
+Best simple fix
+
+Create a small config section in platform.py or separate config.py.
+
+Option A: simplest, inside platform.py
+
+Add:
+
+import os
+
+Then:
+
+MODEL_PROVIDER_BASE_URL = os.getenv("MODEL_PROVIDER_BASE_URL", "http://localhost:11434")
+MODEL_PROVIDER_ENDPOINT = os.getenv("MODEL_PROVIDER_ENDPOINT", "/api/chat")
+MODEL_NAME = os.getenv("MODEL_NAME", "qwen2.5-coder:7b")
+MODEL_TIMEOUT_SECONDS = int(os.getenv("MODEL_TIMEOUT_SECONDS", "120"))
+
+Then create the client:
+
+llm_client = OllamaClient(
+    base_url=MODEL_PROVIDER_BASE_URL,
+    endpoint=MODEL_PROVIDER_ENDPOINT,
+    model=MODEL_NAME,
+    timeout_seconds=MODEL_TIMEOUT_SECONDS,
+)
+
+This makes future replacement easy.
+
+Example:
+
+MODEL_NAME=llama3.2 uvicorn code_review.main:app --reload
+
+or:
+
+MODEL_PROVIDER_BASE_URL=http://localhost:9999 pytest
+Recommended corrected OllamaClient
+
+Change your OllamaClient to this:
+
+class OllamaClient:
+    def __init__(
+        self,
+        base_url: str = OLLAMA_BASE_URL,
+        endpoint: str = OLLAMA_ENDPOINT,
+        model: str = OLLAMA_MODEL,
+        timeout_seconds: int = OLLAMA_TIMEOUT_SECONDS,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.endpoint = endpoint
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+        self.system_prompt = system_prompt
+
+    def ask(self, prompt: str) -> str:
+        url = f"{self.base_url}{self.endpoint}"
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": self.system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            "stream": False,
+        }
+
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+
+            data = response.json()
+
+            if "message" not in data:
+                raise RuntimeError("Ollama response did not contain a 'message' field.")
+
+            if "content" not in data["message"]:
+                raise RuntimeError("Ollama response message did not contain a 'content' field.")
+
+            return data["message"]["content"]
+
+        except requests.exceptions.ConnectionError:
+            raise RuntimeError("Could not connect to model provider. Make sure it is running.")
+
+        except requests.exceptions.Timeout:
+            raise RuntimeError("Model provider request timed out.")
+
+        except requests.exceptions.RequestException as error:
+            raise RuntimeError(f"Model provider request failed: {error}")
+
+        except ValueError:
+            raise RuntimeError("Model provider returned an invalid JSON response.")
+
+Notice I changed the error messages from only "Ollama" to "model provider". That helps show the system is designed for future replacement.
+
+Optional but better: create a ModelClient interface
+
+For a cleaner future-proof version, define a small interface/protocol.
+
+from typing import Protocol
+
+
+class ModelClient(Protocol):
+    def ask(self, prompt: str) -> str:
+        ...
+
+Then:
+
+class CodeReviewer:
+    def __init__(self, llm_client: ModelClient, rules: list[ReviewRule]):
+        self.llm_client = llm_client
+        self.rules = rules
+
+Now CodeReviewer does not depend specifically on OllamaClient.
+
+It can use:
+
+OllamaClient()
+FakeModelClient()
+OpenAIClient()
+AnotherLocalModelClient()
+
+This is the strongest way to satisfy the rule.
+
+Example fake client for tests
+class FakeModelClient:
+    def ask(self, prompt: str) -> str:
+        return '{"passed": true}'
+
+Then test:
+
+reviewer = CodeReviewer(
+    llm_client=FakeModelClient(),
+    rules=REVIEW_RULES,
+)
+
+No Ollama. No network. No tiny local dragon waking up during tests.
+
+Final answer
+
+You are mostly compliant, but I would make these changes:
+
+1. Add endpoint as a parameter in OllamaClient.
+2. Use generic “model provider” wording instead of hardcoded “Ollama” in some errors.
+3. Load base_url, endpoint, model, and timeout from environment variables or config.
+4. Optionally define a ModelClient Protocol so CodeReviewer can accept any provider.
+
+After those changes, you can honestly say:
+
+“The model provider connection details and model name are fully configurable. The reviewer receives the model client as a dependency, so we can replace Ollama with a fake client for tests or another provider in the future.”
+
+how do i extract our conversion ? 
+
+Do you mean extract/export our ChatGPT conversation?
+
+You have a few options:
+
+Option 1: Export all ChatGPT data
+
+In ChatGPT:
+
+Profile icon / Settings
+→ Settings
+→ Data Controls
+→ Export Data
+→ Confirm export
+
+Then OpenAI sends you an email with a download link. The link expires after 24 hours, and the exported ZIP includes your chat history and other account data.
+
+Important note: OpenAI says chat exports are not available for ChatGPT Business or Enterprise accounts.
+
+Option 2: Copy this conversation manually
+
+For this specific chat, the fastest way is usually:
+
+Click inside the conversation
+Select the relevant messages
+Copy
+Paste into a .txt / .md / Google Doc file
+
+This is best if you only need this project conversation and not your whole ChatGPT history.
+
+Option 3: Use the exported conversations.json
+
+After exporting your data, look inside the ZIP for a file like:
+
+conversations.json
+
+That file contains your conversations in JSON format. You can search inside it for words like:
+
+Ollama
+CodeReviewer
+Cisco
+
+Then copy the relevant conversation into a document.
+
+For your Cisco assignment, I recommend copying this conversation manually into a .md file, or exporting all data and searching conversations.json if you want the full history.
+
+can you do it automoaticlly? 
+
+I can’t automatically export the exact raw ChatGPT transcript from the UI or trigger the official data export for you.
+
+But I created a clean Markdown file with the useful content from our conversation: architecture, Ollama decisions, risks, code-review feedback, tests, and final fix list.
+
+Download the conversation notes 
+
+how can i support, the easyest way, that the user enter LLM model like oollam ? 
+
+
+The easiest clean way is: let the user choose the Ollama model name, not the whole “LLM provider” yet.
+
+For example, the user can send:
+
+llama3.2
+
+or:
+
+mistral
+
+or:
+
+codellama
+
+Then your API passes this model name into OllamaClient.
+
+Best simple approach for your POC
+
+Add an optional field to the scan request:
+
+model_name
+
+Since the user is already uploading a file, the easiest FastAPI way is to use Form.
+
+1. Update imports in platform.py
+from fastapi import APIRouter, BackgroundTasks, UploadFile, File, HTTPException, Form
+2. Add a default model constant
+
+In code_reviewer.py, you already have something like:
+
+OLLAMA_MODEL = "llama3.2"
+
+Keep that as the default.
+
+3. Change your /scans endpoint
+@router.post("/scans")
+async def create_scan(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    model_name: str = Form("llama3.2"),
+):
+    db.delete_expired_scans()
+
+    code_text = await check_if_valid_file_input(file)
+    code_hash = create_code_hash(code_text)
+
+    existing_code = db.get_scan_by_hash(code_hash)
+
+    if existing_code:
+        return {
+            "scan_id": existing_code.scan_id,
+            "status": existing_code.status
+        }
+
+    if db.count_running_scans() >= 5:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many scans in progress. Please try again later."
+        )
+
+    scan_id = str(uuid.uuid4())
+
+    scan = db.create_scan(
+        scan_id=scan_id,
+        file_name=file.filename,
+        code_hash=code_hash,
+        status=STATUS_RUNNING,
+    )
+
+    background_tasks.add_task(
+        run_code_review_scan,
+        scan_id,
+        code_text,
+        model_name,
+    )
+
+    return {
+        "scan_id": scan.scan_id,
+        "status": scan.status,
+        "model_name": model_name,
+    }
+4. Update run_code_review_scan
+
+Instead of using the global code_reviewer, create the client with the selected model inside the background task:
+
+def run_code_review_scan(scan_id: str, code_text: str, model_name: str) -> None:
+    try:
+        llm_client = OllamaClient(model=model_name)
+
+        reviewer = CodeReviewer(
+            llm_client=llm_client,
+            rules=REVIEW_RULES,
+        )
+
+        review_result = reviewer.review_code(code_text)
+        result_json = json.dumps(review_result)
+        db.update_scan_result(scan_id, result_json)
+
+    except Exception as error:
+        db.mark_scan_failed(scan_id, str(error))
+
+This is probably the simplest and cleanest version.
+
+Should you store the model in the DB?
+
+I recommend yes. Add:
+
+model_name: str
+
+to your Scan table.
+
+Why? Because later, when you fetch a result, you can know which model reviewed the code.
+
+class Scan(SQLModel, table=True):
+    __tablename__ = "scans"
+
+    scan_id: str = Field(primary_key=True)
+    filename: str
+    code_hash: str = Field(index=True)
+    model_name: str = "llama3.2"
+    status: str = Field(index=True)
+    result: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    expires_at: datetime = Field(index=True)
+
+Then update create_scan:
+
+def create_scan(
+    self,
+    scan_id: str,
+    file_name: str,
+    code_hash: str,
+    model_name: str,
+    status: str = STATUS_RUNNING,
+) -> Scan:
+
+And:
+
+scan = Scan(
+    scan_id=scan_id,
+    filename=file_name,
+    code_hash=code_hash,
+    model_name=model_name,
+    status=status,
+    created_at=created_at,
+    expires_at=expires_at,
+    result=None,
+    error_message=None
+)
+
+Then in your API:
+
+scan = db.create_scan(
+    scan_id=scan_id,
+    file_name=file.filename,
+    code_hash=code_hash,
+    model_name=model_name,
+    status=STATUS_RUNNING,
+)
+One important caching detail
+
+Right now you check duplicate scans only by:
+
+code_hash
+
+But if the user scans the same code with a different model, should it reuse the old result?
+
+Probably no.
+
+Because llama3.2 and codellama may give different answers.
+
+So once you support user-selected models, your cache should check:
+
+same code_hash + same model_name + not expired
+
+Update:
+
+existing_code = db.get_scan_by_hash(code_hash)
+
+to something like:
+
+existing_code = db.get_scan_by_hash_and_model(code_hash, model_name)
+
+Or modify your method:
+
+def get_scan_by_hash(self, code_hash: str, model_name: str) -> Optional[Scan]:
+    now = datetime.now(timezone.utc)
+
+    with Session(self.engine) as session:
+        statement = (
+            select(Scan)
+            .where(Scan.code_hash == code_hash)
+            .where(Scan.model_name == model_name)
+            .where(Scan.expires_at > now)
+            .where(Scan.status != STATUS_FAILED)
+            .order_by(Scan.created_at.desc())
+        )
+        return session.exec(statement).first()
+
+This is a small change, but it makes your logic more correct.
+
+Final recommendation
+
+For the easiest good solution:
+
+Let the user pass model_name as an optional Form field in POST /scans.
+Use it to create OllamaClient(model=model_name).
+Store model_name in the Scan table.
+Check cache by code_hash + model_name.
+
+This keeps your project simple, but also shows thoughtful design: model details are configurable, not hardcoded into the tiny stone tablets.
+
+hhow about whith os ? 
+
+Yes, using os is actually a very good idea here.
+
+The idea is:
+
+Instead of hardcoding the Ollama model name inside the code, read it from an environment variable.
+
+That means later you can change the model without editing the code.
+
+Simple version with os
+
+In code_reviewer.py:
+
+import os
+
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_GENERATE_ENDPOINT = os.getenv("OLLAMA_GENERATE_ENDPOINT", "/api/generate")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
+
+What this means:
+
+os.getenv("OLLAMA_MODEL", "llama3.2")
+
+means:
+
+Try to read OLLAMA_MODEL from the computer environment.
+If it does not exist, use "llama3.2" as default.
+
+So your OllamaClient stays the same:
+
+class OllamaClient:
+    def __init__(
+        self,
+        base_url: str = OLLAMA_BASE_URL,
+        model: str = OLLAMA_MODEL,
+        timeout_seconds: int = OLLAMA_TIMEOUT_SECONDS,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+How the user changes model
+
+In terminal, before running the server:
+
+macOS / Linux
+export OLLAMA_MODEL=mistral
+uvicorn code_review.main:app --reload
+Windows PowerShell
+$env:OLLAMA_MODEL="mistral"
+uvicorn code_review.main:app --reload
+
+Now your code uses mistral without changing Python files.
+
+This satisfies the assignment nicely
+
+The assignment says model/provider details should be easy to replace.
+
+Using os.getenv gives you:
+
+default model in code
+easy override from terminal
+no hardcoded-only model
+
+That is exactly what they want.
+
+Should the API user choose model too?
+
+For the easiest POC, I would not let every API request choose a model.
+
+I would do this:
+
+Model is configured by environment variable.
+All scans use that configured model.
+
+Why? Simpler, cleaner, less DB changes.
+
+Later, if you want, you can add per-request model_name.
+
+Recommended for your project now
+
+Use environment variables:
+
+import os
+
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_GENERATE_ENDPOINT = os.getenv("OLLAMA_GENERATE_ENDPOINT", "/api/generate")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
+
+And in your README, write:
+
+export OLLAMA_MODEL=llama3.2
+
+or:
+
+export OLLAMA_MODEL=mistral
+
+This is probably the cleanest version for your assignment.
+
+please create test files for each code file in my project and also tests for the integration between them, think on edge cases and add them as well 
+
+1. database.py
+* create scan
+* get scan by id
+* update scan result
+* mark scan as failed
+* delete expired scans
+* count running scans
+* get scan by code hash
+* make sure old or failed scans are not reused
+
+2. code_reviewer
+* ReviewRule builds the prompt correctly
+* OllamaClient sends the correct request payload
+* OllamaClient handles connection error, timeout, bad response and invalid json
+* CodeReviewer runs all rules
+* CodeReviewer handles invalid model response
+* CodeReviewer returns true/false result for each rule
+* if fail the final print to the user should be failed 
+
+3. platform
+* valid python file upload creates a scan
+* wrong file extension returns error
+* empty file returns error
+* non utf-8 file returns error
+* duplicate code reuses existing result
+* more than 5 running scans to returns 429
+* get scan result returns completed result
+* get scan result returns failed error
+* get scan result returns running status
+* unknown scan id returns 404
+
+4. integration between files
+* POST /scans creates a DB row
+* background scan calls the CodeReviewer
+* completed review updates the DB
+* failed review updates the DB with failed status
+* GET /scans/{scan_id} returns the correct saved result
+* failed LLM = status failed
+
+please use pytest 
+
+
+Worked for 24s
+
+Done. I created a zip with pytest test files for:
+
+database.py
+code_reviewer.py
+platform.py
+integration tests
+
+Download the pytest tests zip
+
+A few of these tests are intentionally strict and may fail on your current version, especially around:
+
+get_scan_by_hash should ignore expired scans
+get_scan_by_hash should not reuse failed scans
+same running code should reuse the existing running scan instead of starting duplicate work
+
+That is good: they reveal exactly where the code should be tightened before submission. 
+i want to improve my README file before submitting the assignment
+please rewrite the README in a clearer and more professional way
+the most important part is that the run instructions will be very easy to follow
+please make sure the README includes:
+- short project description
+- quick start section
+- how to create and activate virtual environment
+- how to install requirements
+- how to install / run ollama
+- how to pull the required model
+- how to run the fastapi server
+- how to open swagger ui
+- how to use the api endpoints
+- what the database does
+- main features
+- code review rules
+- project structure
+- validation rules
+- scan caching
+- 5 running scans limit
+- 24 hour result expiration
+- short design decisions
+
+please keep the language simple and clear
+
+also please fix spelling mistakes and make the markdown clean
+
+do not add a tests section for now
+Worked for 18s
+
+I rewrote it as a clean README.md you can copy directly. I based it on your current project structure: main.py creates the FastAPI app and initializes tables on startup, platform.py defines the API routes and environment-configured model provider, database.py stores scans in SQLite with 24-hour expiration and scan status fields, and code_reviewer.py defines the Ollama client and the two review rules.
+
+For Ollama setup, I used official Ollama sources: Ollama supports local model running and has official download/install instructions; your current code uses a local Ollama server at http://localhost:11434, the /api/chat endpoint, and the default model qwen2.5-coder:7b.
+
+Local Python Code Review Platform
+Project Description
+
+This project is a local Python code review platform built with FastAPI.
+
+The system receives a Python file through an API, starts an asynchronous code review scan, and returns a scan_id to the user. The user can later use this scan_id to get the scan status and result.
+
+The code review is done by a local LLM using Ollama. The scan result is saved in a local SQLite database for 24 hours.
+
+The project is designed as a simple proof of concept, with a clean structure that makes it easy to add more review rules in the future.
+
+Main Features
+Upload a Python .py file.
+Start a code review scan asynchronously.
+Return a scan_id immediately.
+Get scan status and result using the scan_id.
+Use a local Ollama model for code review.
+Save scan results in a local SQLite database.
+Reuse existing results for the same code when possible.
+Limit the system to 5 running scans at the same time.
+Expire scan results after 24 hours.
+Support simple configuration of the local model provider using environment variables.
+Quick Start
+
+Follow these steps to run the project locally.
+
+1. Clone the Repository
+git clone <your-repository-url>
+cd <your-project-folder>
+2. Create a Virtual Environment
+macOS / Linux
+python3 -m venv .venv
+Windows
+python -m venv .venv
+3. Activate the Virtual Environment
+macOS / Linux
+source .venv/bin/activate
+Windows PowerShell
+.venv\Scripts\Activate.ps1
+Windows CMD
+.venv\Scripts\activate.bat
+
+After activation, you should see (.venv) in the terminal.
+
+4. Install Requirements
+pip install -r requirements.txt
+
+If requirements.txt is missing or incomplete, install the main packages manually:
+
+pip install fastapi uvicorn sqlmodel requests python-multipart
+Ollama Setup
+
+This project uses Ollama to run the LLM locally.
+
+1. Install Ollama
+
+Install Ollama from the official website:
+
+https://ollama.com/download
+
+For macOS or Linux, Ollama also provides this install command:
+
+curl -fsSL https://ollama.com/install.sh | sh
+
+On Windows, download and install Ollama from the official download page.
+
+2. Start Ollama
+
+After installation, make sure Ollama is running.
+
+You can check it by opening:
+
+http://localhost:11434
+
+You can also run:
+
+ollama
+
+or start a model with:
+
+ollama run <model-name>
+3. Pull the Required Model
+
+The default model used by this project is:
+
+qwen2.5-coder:7b
+
+Pull it with:
+
+ollama pull qwen2.5-coder:7b
+
+You can verify that the model exists with:
+
+ollama list
+Model Provider Configuration
+
+The project uses default model settings, but they can be changed with environment variables.
+
+Default values:
+
+MODEL_PROVIDER_BASE_URL=http://localhost:11434
+MODEL_PROVIDER_ENDPOINT=/api/chat
+MODEL_NAME=qwen2.5-coder:7b
+MODEL_TIMEOUT_SECONDS=120
+
+Example:
+
+export MODEL_NAME=qwen2.5-coder:7b
+export MODEL_PROVIDER_BASE_URL=http://localhost:11434
+export MODEL_PROVIDER_ENDPOINT=/api/chat
+export MODEL_TIMEOUT_SECONDS=120
+
+Then run the server from the same terminal.
+
+On Windows PowerShell:
+
+$env:MODEL_NAME="qwen2.5-coder:7b"
+$env:MODEL_PROVIDER_BASE_URL="http://localhost:11434"
+$env:MODEL_PROVIDER_ENDPOINT="/api/chat"
+$env:MODEL_TIMEOUT_SECONDS="120"
+Run the FastAPI Server
+
+From the project root, run:
+
+uvicorn code_review.main:app --reload
+
+If your files are not inside a code_review package, run:
+
+uvicorn main:app --reload
+
+The server should start at:
+
+http://127.0.0.1:8000
+Open Swagger UI
+
+FastAPI automatically creates an interactive API page.
+
+Open this in your browser:
+
+http://127.0.0.1:8000/docs
+
+You can use Swagger UI to upload files and test the API endpoints directly from the browser.
+
+API Endpoints
+1. Health Check
+GET /
+
+Returns a simple welcome message.
+
+Example response:
+
+{
+  "message": "Hi! welcome to my code review platform"
+}
+2. Create a New Scan
+POST /scans
+
+This endpoint receives a Python file and starts a code review scan.
+
+Input:
+
+A file uploaded as form-data.
+The file must have a .py extension.
+
+Example response:
+
+{
+  "scan_id": "3f7a62a1-7d3a-4c5e-bf9e-41d1f52e8b21",
+  "status": "running"
+}
+
+The scan runs in the background. The user should save the scan_id and use it later to get the result.
+
+3. Get Scan Result
+GET /scans/{scan_id}
+
+This endpoint returns the scan status and result.
+
+Example while the scan is still running:
+
+{
+  "scan_id": "3f7a62a1-7d3a-4c5e-bf9e-41d1f52e8b21",
+  "status": "running"
+}
+
+Example when the scan is completed:
+
+{
+  "scan_id": "3f7a62a1-7d3a-4c5e-bf9e-41d1f52e8b21",
+  "status": "completed",
+  "result": {
+    "checked_rules": [
+      {
+        "rule_id": "meaningful_variable_names",
+        "passed": true
+      },
+      {
+        "rule_id": "docstring_matches_logic",
+        "passed": false
+      }
+    ]
+  }
+}
+
+Example when the scan failed:
+
+{
+  "scan_id": "3f7a62a1-7d3a-4c5e-bf9e-41d1f52e8b21",
+  "status": "failed",
+  "error_message": "Could not connect to model provider. Make sure model provider is running locally."
+}
+
+If the scan ID does not exist, the API returns:
+
+{
+  "detail": "Scan not found"
+}
+Code Review Rules
+
+The current code reviewer checks two rules:
+
+1. Meaningful Variable Names
+
+Checks whether variables in the Python code have clear and descriptive names.
+
+Examples of weak names:
+
+x, y, z, a, b, tmp, data, val, foo, bar
+
+Examples of better names:
+
+total_price, user_count, file_content, scan_result
+2. Function Docstrings Match Code Logic
+
+Checks whether function docstrings describe what the function actually does.
+
+If a docstring says the function sorts a list, but the code only filters values, the rule should fail.
+
+Validation Rules
+
+Before starting a scan, the platform validates the uploaded file.
+
+The file must:
+
+Exist.
+Have a .py extension.
+Not be empty.
+Be valid UTF-8 text.
+
+If the file is invalid, the API returns a 400 Bad Request error.
+
+Database
+
+The project uses a local SQLite database.
+
+By default, the database file is:
+
+scans.db
+
+The database stores scan information, including:
+
+scan_id
+filename
+code_hash
+status
+result
+error_message
+created_at
+expires_at
+
+The database is created automatically when the FastAPI application starts.
+
+Scan Statuses
+
+A scan can have one of these statuses:
+
+running
+completed
+failed
+running
+
+The scan was created and the code review is still in progress.
+
+completed
+
+The scan finished successfully and the result is available.
+
+failed
+
+The scan failed, usually because the local model provider was unavailable or returned an invalid response.
+
+Scan Caching
+
+The system calculates a SHA-256 hash of the uploaded code.
+
+If the same code was already scanned and the result has not expired, the system reuses the existing scan instead of running the LLM again.
+
+This avoids unnecessary repeated scans for identical code.
+
+5 Running Scans Limit
+
+The system allows up to 5 scans to run at the same time.
+
+If 5 scans are already running and the user submits another new scan, the API returns:
+
+{
+  "detail": "Too many scans in progress. Please try again later."
+}
+
+This protects the local machine from running too many LLM reviews at once.
+
+24 Hour Result Expiration
+
+Each scan result is valid for 24 hours.
+
+When a scan is created, the database stores:
+
+created_at
+expires_at
+
+Expired scans are deleted before new scan operations and before fetching scan results.
+
+This keeps the local database small and prevents old results from being reused forever.
+
+Project Structure
+
+Example structure:
+
+code_review/
+├── main.py
+├── platform.py
+├── database.py
+├── code_reviewer.py
+├── requirements.txt
+└── README.md
+main.py
+
+Creates the FastAPI application, creates the database tables on startup, and includes the API router.
+
+platform.py
+
+Defines the API endpoints, validates uploaded files, creates code hashes, starts background scans, and returns scan results.
+
+database.py
+
+Defines the SQLite scan table and all database operations.
+
+code_reviewer.py
+
+Defines the review rules, the Ollama client, and the code review logic.
+
+Short Design Decisions
+FastAPI
+
+FastAPI was chosen because it is simple, modern, and works well for building API services.
+
+It also provides Swagger UI automatically, which makes the project easy to test.
+
+SQLite
+
+SQLite was chosen because it is local, simple to run, and does not require a separate database server.
+
+This fits the requirement that the project should run locally.
+
+SQLModel
+
+SQLModel was used to define the scan table and interact with SQLite in a structured way.
+
+Ollama
+
+Ollama was used because the assignment requires a local LLM.
+
+The platform sends prompts to the local Ollama server and receives a JSON answer from the model.
+
+Background Tasks
+
+The scan endpoint returns a scan_id immediately and runs the code review in the background.
+
+This prevents long API requests and allows the user to fetch the result later.
+
+Code Hashing
+
+The platform hashes the uploaded code to detect duplicate scans.
+
+This allows the system to reuse recent results for the same code.
+
+Separate Components
+
+The project is split into separate files:
+
+API logic
+Database logic
+Code review logic
+Application startup
+
+This keeps the code easier to read, test, and extend.
