@@ -1,92 +1,82 @@
 # Local Python Code Review Platform
 
-A local FastAPI service for reviewing uploaded Python code using a local LLM through Ollama.
-The platform accepts a Python `.py` file, starts an asynchronous code review scan, stores the scan state in SQLite, and returns a `scan_id`. The user can later fetch the scan status and result using this ID.
+A local FastAPI service for reviewing uploaded Python code using a local LLM through Ollama. 
+The platform accepts a Python `.py` file, starts an asynchronous code review scan, stores the scan state in a local SQLite database, and returns a `scan_id`. The user can later fetch the scan status and result using this ID.
+
 ---
 
 ## Quick Start
+
 ### 1. Create and activate a virtual environment
-macOS / Linux:
-```bash
+**macOS / Linux:**
+` ` `bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-Windows:
-```bash
+` ` `
+
+**Windows:**
+` ` `bash
 python -m venv .venv
 .venv\Scripts\activate
-```
+` ` `
+
 ### 2. Install dependencies
-```bash
+` ` `bash
 pip install -r requirements.txt
-```
-```bash
-pip install fastapi uvicorn sqlmodel requests python-multipart
-```
+` ` `
+
 ### 3. Install Ollama
-Install Ollama from:
-https://ollama.com/download
-Make sure Ollama is running locally.
-Default Ollama server:
-http://localhost:11434
+This project uses Ollama to run the LLM locally.
+1. Install Ollama from the official site: https://ollama.com/download
+2. Make sure Ollama is running locally. The default Ollama server URL is: `http://localhost:11434`
 
 ### 4. Pull the required model
-The default model is:
-qwen2.5-coder:7b
-Pull it with:
-```bash
+The default model for this project is `qwen2.5-coder:7b`. Pull it by running:
+` ` `bash
 ollama pull qwen2.5-coder:7b
-```
-Verify installation:
-```bash
-ollama list
-```
+` ` `
+*(You can verify the installation by running `ollama list`)*
+
 ### 5. Run the FastAPI server
-From the project root:
-```bash
+From the project root directory, run:
+` ` `bash
 uvicorn code_review.main:app --reload
-```
-The server runs at:
-```text
-http://127.0.0.1:8000
-```
+` ` `
+The server will start at: `http://127.0.0.1:8000`
+
 ### 6. Open Swagger UI
-```text
-http://127.0.0.1:8000/docs
-```
-Use Swagger UI to upload a Python file and call the API endpoints.
+Navigate to `http://127.0.0.1:8000/docs` in your browser. You can use the interactive Swagger UI to upload a Python file and test the API endpoints.
+
 ---
 
 ## API Flow
 
-### 1. Create a scan
-```http
-POST /scans
-```
-Upload a `.py` file using form-data.
-Example response:
-```json
-{
-  "scan_id": "3f7a62a1-7d3a-4c5e-bf9e-41d1f52e8b21",
-  "status": "running"
-}
-```
-The scan runs in the background. The response does not wait for the LLM review to finish.
----
+### 1. Create a Scan
+**Endpoint:** `POST /scans`
 
-### 2. Get scan result
-```http
-GET /scans/{scan_id}
-```
-If the scan is still running:
-```json
+Upload a `.py` file using `form-data`.
+**Example Response:**
+` ` `json
 {
   "scan_id": "3f7a62a1-7d3a-4c5e-bf9e-41d1f52e8b21",
   "status": "running"
 }
-```
-If the scan completed:
-```json
+` ` `
+*Note: The scan runs in the background. The response returns immediately without waiting for the LLM review to finish.*
+
+### 2. Get Scan Result
+**Endpoint:** `GET /scans/{scan_id}`
+
+**If the scan is still running:**
+` ` `json
+{
+  "scan_id": "3f7a62a1-7d3a-4c5e-bf9e-41d1f52e8b21",
+  "status": "running"
+}
+` ` `
+
+**If the scan completed:**
+` ` `json
 {
   "scan_id": "3f7a62a1-7d3a-4c5e-bf9e-41d1f52e8b21",
   "status": "completed",
@@ -103,125 +93,79 @@ If the scan completed:
     ]
   }
 }
-```
-If the scan failed:
-```json
+` ` `
+
+**If the scan failed:**
+` ` `json
 {
   "scan_id": "3f7a62a1-7d3a-4c5e-bf9e-41d1f52e8b21",
   "status": "failed",
-  "error_message": "Could not connect to model provider. Make sure model provider is running locally."
+  "error_message": "Could not connect to model provider. Make sure the model provider is running locally."
 }
-```
-If the scan ID does not exist:
-```json
-{
-  "detail": "Scan not found"
-}
-```
----
-## Endpoints
-| Method | Path               | Description                          |
-| ------ | ------------------ | ------------------------------------ |
-| `GET`  | `/`                | Welcome                         |
-| `POST` | `/scans`           | Upload Python file and create a scan |
-| `GET`  | `/scans/{scan_id}` | Get scan status/result               |
+` ` `
+
 ---
 
 ## Code Review Rules
-The current reviewer checks two rules:
-Checks whether variables have clear and descriptive names.
-Checks whether function docstrings describe the actual function behavior.
-For example, if a docstring says that a function sorts a list but the implementation only filters values, the rule should fail.
+The current reviewer checks the code against two rules:
+1. **Meaningful Variable Names:** Checks whether variables have clear and descriptive names (avoiding arbitrary names like `x`, `foo`, `tmp` unless contextually appropriate).
+2. **Docstring Matches Logic:** Checks whether function docstrings accurately describe the actual function behavior. (e.g., if a docstring says a function sorts a list, but the implementation only filters values, the rule will fail).
 
-## Validation Rules
-Before creating a scan, the uploaded file is validated.
-The file must:
-* Have a `.py` extension.
-* Not be empty.
-* Be valid UTF-8 text.
-Invalid files return `400 Bad Request`.
 ---
 
-## Database
-The project uses a local SQLite database.
-Default database file: scans.db
-The database stores scan metadata and results:
-scan_id
-filename
-code_hash
-status
-result
-error_message
-created_at
-expires_at
-Tables are created automatically when the FastAPI app starts.
----
+## Validation & Constraints
 
-## Scan Lifecycle
-A scan can have one of three statuses:
-running - The scan was created and the background review is still in progress 
-completed - The LLM review finished successfully and the result is available.
-failed - The review failed, usually because the local model provider was unavailable, timed out, or returned an invalid response.
----
+* **File Validation:** Uploaded files must have a `.py` extension, must not be empty, and must be valid UTF-8 text. Invalid files return a `400 Bad Request`.
+* **Scan Caching:** The platform calculates a SHA-256 hash of the uploaded code. If the exact same code was already scanned and hasn't expired, the existing scan result is reused.
+* **Concurrency Limit:** The platform allows up to **5 scans** to run concurrently to avoid overloading the local machine. Additional requests will return a `429 Too Many Requests` error.
+* **Result Expiration:** Scan results are temporarily stored in a SQLite database (`scans.db`) and are strictly valid for **24 hours**. Expired scans are automatically purged.
 
-## Scan Caching
-The platform calculates a SHA-256 hash of the uploaded code.
-If the same code was already scanned and the previous scan has not expired, the existing scan is reused instead of calling the LLM again.
-This avoids repeated work for identical code.
----
-
-## Running Scan Limit
-The platform allows up to 5 scans to run at the same time.
-If 5 scans are already running, a new scan request returns:
-```json
-{
-  "detail": "Too many scans in progress. Please try again later."
-}
-```
-This prevents too many local LLM calls from running in parallel.
----
-
-## Result Expiration
-Scan results are valid for 24 hours.
-Each scan stores:
-created_at
-expires_at
-Expired scans are deleted before creating a new scan and before fetching scan results.
-This keeps the local database small and prevents old results from being reused forever.
 ---
 
 ## Model Provider Configuration
+The project is parameterized to allow easy replacement of the LLM provider using environment variables. 
+**Default configuration:**
+* `MODEL_PROVIDER_BASE_URL` = `http://localhost:11434`
+* `MODEL_PROVIDER_ENDPOINT` = `/api/chat`
+* `MODEL_NAME` = `qwen2.5-coder:7b`
+* `MODEL_TIMEOUT_SECONDS` = `120`
 
-The project uses Ollama by default.
-Default configuration:
-MODEL_PROVIDER_BASE_URL=http://localhost:11434
-MODEL_PROVIDER_ENDPOINT=/api/chat
-MODEL_NAME=qwen2.5-coder:7b
-MODEL_TIMEOUT_SECONDS=120
+### Bonus: Testing with LM Studio
+The platform is fully parameterized and can easily work with other local providers like LM Studio.
+
+To test with LM Studio instead of Ollama:
+
+1. Open LM Studio and start the Local Server (the default port is usually `1234`).
+2. Set the environment variables in your terminal to override the default Ollama settings:
+
+**macOS / Linux:**
+` ` `bash
+export MODEL_PROVIDER_BASE_URL="http://localhost:1234"
+export MODEL_PROVIDER_ENDPOINT="/v1/chat/completions"
+export MODEL_NAME="your-downloaded-model-name"
+` ` `
+
+**Windows (PowerShell):**
+` ` `powershell
+$env:MODEL_PROVIDER_BASE_URL="http://localhost:1234"
+$env:MODEL_PROVIDER_ENDPOINT="/v1/chat/completions"
+$env:MODEL_NAME="your-downloaded-model-name"
+` ` `
+
+3. Run the FastAPI server from the same terminal session:
+` ` `bash
+uvicorn code_review.main:app --reload
+` ` `
+
+---
 
 ## Project Structure
+` ` `text
 code_review/
-├── main.py: Creates the FastAPI app, initializes database tables on        startup, and includes the API router.
-
-├── platform.py: Contains the API routes, file validation, code hashing, scan creation, background task execution, and result retrieval.
-├── database.py - Contains the SQLModel scan model and all SQLite database operations.
-
-├── code_reviewer.py - Contains the review rules, the Ollama client, prompt handling, model response parsing, and final rule results.
+├── main.py          # Creates the FastAPI app and initializes the DB tables
+├── platform.py      # Contains the API routes, file validation, and background tasks
+├── database.py      # Contains the SQLModel schema and SQLite database operations
+├── code_reviewer.py # Contains the Ollama client, prompt building, and review rules
 ├── requirements.txt
 └── README.md
----
-## Design Decisions
-### FastAPI
-FastAPI was chosen because this project is API-first and needs simple support for file uploads, background tasks, and Swagger UI.
-
-### SQLite
-SQLite was chosen because the assignment requires a local setup and the project does not need a separate database server.
-
-### SQLModel
-SQLModel provides a clean way to define the scan table and interact with SQLite.
-
-### Ollama
-Ollama is used to run the LLM locally. The platform sends prompts to the local Ollama API and expects a JSON result.
-
-### Background Tasks
-The scan request returns immediately with a `scan_id`, while the LLM review runs in the background. This avoids long-running HTTP requests.
+` ` `
