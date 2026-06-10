@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+
 import hashlib
 import json
 import uuid
@@ -10,34 +10,18 @@ END_FILE_FORMATS = ".py"
 MAX_CONCURRENT_SCANS = 5
 
 
-""" This module defines the API routes and handlers for the code review platform. 
+""" This file defines the API routes and handlers for the code review platform. 
 It uses FastAPI to create endpoints for uploading code files, checking scan status, and retrieving results. 
 It also initializes the database and the code reviewer client."""
 
 router = APIRouter()
 db = Database()
 
-
 """ The OllamaClient is initialized with the model provider configuration."""
-MODEL_PROVIDER_BASE_URL = os.getenv(
-    "MODEL_PROVIDER_BASE_URL",
-    OLLAMA_BASE_URL
-)
-
-MODEL_PROVIDER_ENDPOINT = os.getenv(
-    "MODEL_PROVIDER_ENDPOINT",
-    OLLAMA_ENDPOINT
-)
-
-MODEL_NAME = os.getenv(
-    "MODEL_NAME",
-    OLLAMA_MODEL
-)
-
-MODEL_TIMEOUT_SECONDS = int(os.getenv(
-    "MODEL_TIMEOUT_SECONDS",
-    str(OLLAMA_TIMEOUT_SECONDS))
-)
+MODEL_PROVIDER_BASE_URL = os.getenv("MODEL_PROVIDER_BASE_URL",OLLAMA_BASE_URL)
+MODEL_PROVIDER_ENDPOINT = os.getenv("MODEL_PROVIDER_ENDPOINT",OLLAMA_ENDPOINT)
+MODEL_NAME = os.getenv("MODEL_NAME",OLLAMA_MODEL)
+MODEL_TIMEOUT_SECONDS = int(os.getenv("MODEL_TIMEOUT_SECONDS",str(OLLAMA_TIMEOUT_SECONDS)))
 
 llm_client = OllamaClient(
     base_url=MODEL_PROVIDER_BASE_URL,
@@ -67,14 +51,15 @@ async def check_if_valid_file_input(file: UploadFile) -> str:
         )
     return code_text
 
-""" This function creates a SHA-256 hash of the code text. This is used to identify duplicate scans"""
 def create_code_hash(code_text) -> str:
+    """ This function creates a SHA-256 hash of the code text. This is used to identify duplicate scans"""
     return hashlib.sha256(code_text.encode("utf-8")).hexdigest()
 
-""" This function runs the code review scan in the background. It calls the code reviewer to review the code and updates 
-the result in the database. 
-If there is an error during the review, it marks the scan as failed with the error message."""
+
 def run_code_review_scan(scan_id: str, code_text: str) -> None:
+    """ This function runs the code review scan in the background. It calls the code reviewer to review the code and updates 
+        the result in the database. 
+        If there is an error during the review, it marks the scan as failed with the error message."""
     try:
         review_result = code_reviewer.review_code(code_text)
         result_json = json.dumps(review_result)
@@ -89,6 +74,7 @@ def run_code_review_scan(scan_id: str, code_text: str) -> None:
 
 @router.get("/")
 def read_root():
+    db.delete_expired_scans()
     return {"message": "Hi! welcome to my code review platform"}
 
 
@@ -102,7 +88,6 @@ async def create_scan(background_tasks: BackgroundTasks,file: UploadFile = File(
     existing_code= db.get_scan_by_hash(code_hash)
 
     if existing_code:
-        ## existing_code.expires_at = datetime.now(timezone.utc) + timedelta(hours=EXPIRATION_HOURS)
         return {
             "scan_id": existing_code.scan_id,
             "status": existing_code.status
@@ -136,7 +121,6 @@ async def get_scan_result(scan_id: str):
         "scan_id": scan.scan_id,
         "status": scan.status,
     }
-
     if scan.status == STATUS_COMPLETED:
         response["result"] = json.loads(scan.result)
     elif scan.status == STATUS_FAILED:

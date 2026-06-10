@@ -1,7 +1,8 @@
+
 from dataclasses import dataclass
 import requests
 import json
-from typing import List, Dict, Any
+from typing import Any
 
 ## constants for Ollama LLM client
 
@@ -14,7 +15,7 @@ You are a code review assistant.
 Your task is to check the following rule:
 All variables in the Python code should have meaningful and descriptive names.
 A meaningful variable name should clearly describe the purpose of the variable.
-Bad examples: x, y, z, a, b, tmp, data, val, foo, bar, unless their meaning is obvious in a very small/local context.
+Bad examples: x, y, z, a, b, tmp, val, foo, bar, unless their meaning is obvious in a very small/local context.
 Good examples: total_price, user_count, file_content, scan_result.
 Review the Python code below.
 Return only valid JSON as written in the system prompt, with no additional text.
@@ -35,19 +36,27 @@ The JSON must be exactly in this format:
 DOCSTRING_MATCHES_LOGIC_PROMPT = """
 You are a code review assistant.
 Your task is to check the following rule:
-Each function docstring should accurately reflect the actual logic of the function.
-Check whether the function docstrings describe what the function really does.
-If a function has no docstring, only fail this rule if the function clearly should have one because it is non-trivial.
-If a docstring exists but describes different behavior from the implementation, return false.
+Each Python function must have a docstring, and the docstring must accurately reflect the actual logic of the function.
+
+Return false if:
+- any function does not have a docstring
+- a function has a docstring but it describes different behavior from the implementation
+- the docstring is too vague to explain what the function actually does
+
+Return true only if:
+- every function has a docstring
+- every docstring accurately describes the function logic
+
 Review the Python code below.
 Return only valid JSON as written in the system prompt, with no additional text.
 Use true if the code follows the rule.
-Use false if the code does not follow the rule."""
+Use false if the code does not follow the rule.
+"""
 
 
-""" The ReviewRule dataclass represents a code review rule, including its ID, description, and the prompt template used to check the rule. """
 @dataclass
 class ReviewRule:
+    """ The ReviewRule dataclass represents a code review rule, including its ID, description, and the prompt template used to check the rule. """
     rule_id: str
     description: str
     user_prompt_template: str
@@ -66,19 +75,21 @@ class ReviewRule:
 REVIEW_RULES = [
     ReviewRule(
         rule_id="meaningful_variable_names",
-        description="All variables have meaningful names",
+        description="All variables have meaningful names, Return True or False",
         user_prompt_template=MEANINGFUL_VARIABLE_NAMES_PROMPT,
     ),
     ReviewRule(
         rule_id="docstring_matches_logic",
-        description="Function docstrings reflect the actual code logic",
+        description="Function docstrings reflect the actual code logic, Return True or False",
         user_prompt_template=DOCSTRING_MATCHES_LOGIC_PROMPT,
     )
 ]
 
-""" The OllamaClient class is responsible for communicating with the Ollama LLM API.
-It sends prompts to the model and retrieves responses. """
+
 class OllamaClient:
+    """ The OllamaClient class is responsible for communicating with the Ollama LLM API.
+    It sends prompts to the model and retrieves responses. """
+
     def __init__(
         self,
         base_url: str = OLLAMA_BASE_URL,
@@ -109,6 +120,7 @@ class OllamaClient:
                 },
             ],
             "stream": False,
+            "temperature": 0.0
         }
 
         try:
@@ -141,10 +153,11 @@ class OllamaClient:
 
 
 
-""" The CodeReviewer class uses the OllamaClient to review code according to a set of rules defined in REVIEW_RULES. 
-It processes the code and returns the results for each rule. """
 
 class CodeReviewer:
+    """ The CodeReviewer class uses the OllamaClient to review code according to a set of rules defined in REVIEW_RULES. 
+    It processes the code and returns the results for each rule. """
+    
     def __init__(self, llm_client: OllamaClient, rules: list[ReviewRule] = REVIEW_RULES):
         self.llm_client = llm_client
         self.rules = rules
@@ -164,12 +177,8 @@ class CodeReviewer:
                     "rule_id": rule.rule_id,
                     "passed": parsed_response["passed"],
                 }
-
-            except Exception:
-                rule_result = {
-                    "rule_id": rule.rule_id,
-                    "passed": False,
-                }
+            except Exception as error:
+                raise RuntimeError(f"Failed to review rule '{rule.rule_id}': {str(error)}")
 
             final_results.append(rule_result)
 
